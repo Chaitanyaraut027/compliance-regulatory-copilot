@@ -94,3 +94,7 @@ Thumbs.db
 # Redundant Root Files (Cleanliness)
 # ============================================================
 * (1).pdf
+
+node_modules/
+uploads/
+
