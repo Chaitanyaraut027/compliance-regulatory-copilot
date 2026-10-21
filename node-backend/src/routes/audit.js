@@ -15,7 +15,7 @@ router.get('/', authenticate, async (req, res, next) => {
 
         const [dataResult, countResult] = await Promise.all([
             query(
-                `SELECT id, question, compliance_area, overall_status, summary, created_at
+                `SELECT id, question, compliance_area, overall_status, summary, product_name, product_id, created_at
            FROM audit_history
           WHERE user_id = $1
           ORDER BY created_at DESC
@@ -51,7 +51,7 @@ router.get('/:id', authenticate, async (req, res, next) => {
     try {
         const result = await query(
             `SELECT id, question, compliance_area, company_evidence, facility_description,
-              overall_status, summary, findings, disclaimer, created_at
+              overall_status, summary, findings, disclaimer, product_name, product_id, created_at
          FROM audit_history
         WHERE id = $1 AND user_id = $2`,
             [req.params.id, req.user.id]

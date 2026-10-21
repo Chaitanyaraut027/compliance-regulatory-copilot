@@ -1,30 +1,37 @@
 """
-Streamlit UI for Food Regulatory Compliance Copilot.
-Integrated with the Node.js API Gateway (Auth, PDF Upload, Audit Logging)
-and FastAPI RAG Compliance Engine.
+Food Regulatory Intelligence Co-pilot — User Interface
+Connects with Node.js API Gateway (Auth, Audit History, PDF/Doc Upload)
+and Python FastAPI RAG Service (pgvector search, Groq LLM compliance assessment).
 """
 
 import os
-import streamlit as st
+import datetime
 import requests
+import streamlit as st
 
 NODE_API = os.getenv("NODE_API_BASE_URL", "http://localhost:3000/api")
-FASTAPI_BASE = os.getenv("API_BASE_URL", "http://localhost:8000")
+MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB limit
 
 st.set_page_config(
-    page_title="FSSAI Food Regulatory Compliance Copilot",
+    page_title="Food Regulatory Intelligence Co-pilot",
     page_icon="🛡️",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# ── Session State for Theme & Auth ──────────────────────────────
+# ── Session State Management ────────────────────────────────────
 if "theme_mode" not in st.session_state:
-    st.session_state["theme_mode"] = "dark"
-
+    st.session_state["theme_mode"] = "light"
 if "token" not in st.session_state:
     st.session_state["token"] = None
 if "user" not in st.session_state:
     st.session_state["user"] = None
+if "nav_view" not in st.session_state:
+    st.session_state["nav_view"] = "Dashboard"
+if "current_report" not in st.session_state:
+    st.session_state["current_report"] = None
+if "viewing_history_id" not in st.session_state:
+    st.session_state["viewing_history_id"] = None
 
 
 def get_headers():
@@ -33,12 +40,58 @@ def get_headers():
     return {}
 
 
-# ── Dynamic CSS for Light / Dark Mode ───────────────────────────
+def format_date(dt_str):
+    if not dt_str:
+        return "N/A"
+    try:
+        # Parse ISO or Postgres timestamp
+        cleaned = dt_str.replace("Z", "+00:00")
+        dt = datetime.datetime.fromisoformat(cleaned)
+        return dt.strftime("%b %d, %Y - %I:%M %p")
+    except Exception:
+        return str(dt_str)[:19]
+
+
+def map_status(raw_status):
+    raw = (raw_status or "").upper()
+    if raw in ("COMPLIANT", "SATISFIED"):
+        return {
+            "label": "Compliant",
+            "badge_color": "#15803d",
+            "bg_color": "#dcfce7",
+            "border_color": "#86efac",
+            "icon": "✅",
+            "category": "satisfied",
+            "desc": "The available evidence supports the applicable requirement.",
+        }
+    elif raw in ("PARTIALLY_COMPLIANT", "POTENTIALLY_NON_COMPLIANT", "NEEDS_ATTENTION", "NON_COMPLIANT"):
+        return {
+            "label": "Needs Attention",
+            "badge_color": "#b45309",
+            "bg_color": "#fef3c7",
+            "border_color": "#fcd34d",
+            "icon": "⚠️",
+            "category": "attention",
+            "desc": "A potential regulatory gap or issue was identified.",
+        }
+    else:  # MISSING_EVIDENCE, NEEDS_REVIEW, INSUFFICIENT_INFORMATION
+        return {
+            "label": "Insufficient Information",
+            "badge_color": "#1d4ed8",
+            "bg_color": "#dbeafe",
+            "border_color": "#93c5fd",
+            "icon": "ℹ️",
+            "category": "insufficient",
+            "desc": "There is not enough evidence in the uploaded document to reach a conclusion.",
+        }
+
+
+# ── CSS Theming ────────────────────────────────────────────────
 def apply_theme_css():
-    if st.session_state["theme_mode"] == "light":
+    is_light = st.session_state["theme_mode"] == "light"
+    if is_light:
         css = """
         <style>
-            /* ── Base Light Theme ── */
             .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
                 background-color: #f8fafc !important;
                 color: #0f172a !important;
@@ -50,27 +103,22 @@ def apply_theme_css():
             [data-testid="stSidebar"] * {
                 color: #0f172a !important;
             }
-            
-            /* ── Typography & Headings ── */
-            h1, h2, h3, h4, h5, h6, p, span, label, div, [data-testid="stMarkdownContainer"] p {
+            h1, h2, h3, h4, h5, h6, p, span, label, div {
                 color: #0f172a !important;
             }
-            [data-testid="stCaptionContainer"] p, .stCaption, small, code {
-                color: #334155 !important;
-                background-color: transparent !important;
-            }
-            
-            /* ── Buttons (Sign Out, Browse, Trigger, etc.) ── */
             .stButton > button {
-                background-color: #f1f5f9 !important;
+                background-color: #ffffff !important;
                 color: #0f172a !important;
                 border: 1px solid #cbd5e1 !important;
+                border-radius: 8px !important;
                 font-weight: 500 !important;
+                padding: 0.5rem 1rem !important;
+                transition: all 0.2s ease !important;
             }
             .stButton > button:hover {
-                background-color: #e2e8f0 !important;
+                background-color: #f1f5f9 !important;
+                border-color: #0284c7 !important;
                 color: #0284c7 !important;
-                border-color: #94a3b8 !important;
             }
             .stButton > button[kind="primary"] {
                 background-color: #0284c7 !important;
@@ -79,133 +127,76 @@ def apply_theme_css():
             }
             .stButton > button[kind="primary"]:hover {
                 background-color: #0369a1 !important;
-                color: #ffffff !important;
             }
-
-            /* ── File Uploader (Fix dark dropzone & browse button) ── */
-            [data-testid="stFileUploader"] {
-                background-color: #ffffff !important;
-                border: 1px dashed #cbd5e1 !important;
-                border-radius: 8px !important;
-                padding: 1rem !important;
+            .status-badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 6px 14px;
+                border-radius: 20px;
+                font-weight: 600;
+                font-size: 0.9rem;
             }
-            [data-testid="stFileUploader"] section {
-                background-color: #ffffff !important;
+            .report-card {
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 12px;
+                padding: 1.5rem;
+                margin-bottom: 1rem;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.05);
             }
-            [data-testid="stFileUploader"] section div, 
-            [data-testid="stFileUploader"] section span, 
-            [data-testid="stFileUploader"] section small {
-                color: #475569 !important;
-            }
-            [data-testid="stFileUploader"] button {
-                background-color: #f1f5f9 !important;
-                color: #0f172a !important;
-                border: 1px solid #cbd5e1 !important;
-            }
-            [data-testid="stFileUploader"] button:hover {
-                background-color: #e2e8f0 !important;
-                color: #0284c7 !important;
-            }
-
-            /* ── Selectbox / Dropdowns (Fix black dropdown background) ── */
-            .stSelectbox [data-baseweb="select"], 
-            .stSelectbox [data-baseweb="select"] > div,
-            div[data-baseweb="popover"],
-            ul[role="listbox"],
-            li[role="option"] {
-                background-color: #ffffff !important;
-                color: #0f172a !important;
-                border-color: #cbd5e1 !important;
-            }
-            .stSelectbox span, .stSelectbox div {
-                color: #0f172a !important;
-            }
-            li[role="option"]:hover, li[aria-selected="true"] {
-                background-color: #f1f5f9 !important;
-                color: #0284c7 !important;
-            }
-
-            /* ── Inputs & Text Areas ── */
-            .stTextInput>div>div>input, .stTextArea textarea {
-                background-color: #ffffff !important;
-                color: #0f172a !important;
-                border: 1px solid #cbd5e1 !important;
-            }
-            .stTextInput>div>div>input:focus, .stTextArea textarea:focus {
-                border-color: #0284c7 !important;
-                box-shadow: 0 0 0 1px #0284c7 !important;
-            }
-
-            /* ── Expanders ── */
-            div[data-testid="stExpander"] {
-                background-color: #ffffff !important;
-                border: 1px solid #e2e8f0 !important;
-                border-radius: 8px !important;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.04) !important;
-            }
-            div[data-testid="stExpander"] summary {
-                color: #0f172a !important;
-            }
-            div[data-testid="stExpander"] summary:hover {
-                color: #0284c7 !important;
-            }
-            div[data-testid="stExpander"] summary svg {
-                fill: #64748b !important;
-            }
-
-            /* ── Alerts & Info Boxes (Fix dark/faint info boxes) ── */
-            [data-testid="stAlert"] {
-                background-color: #f8fafc !important;
-                color: #0f172a !important;
-                border: 1px solid #e2e8f0 !important;
-            }
-            [data-testid="stAlert"] p {
-                color: #0f172a !important;
-            }
-
-            /* ── Theme Button (Sun / Moon) ── */
-            .theme-toggle-container button {
-                background-color: #ffffff !important;
-                border: 1px solid #cbd5e1 !important;
-                color: #0f172a !important;
-                font-size: 1.35rem !important;
-                border-radius: 9999px !important;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.1) !important;
-            }
-            .theme-toggle-container button:hover {
-                background-color: #f1f5f9 !important;
-                border-color: #94a3b8 !important;
+            .disclaimer-banner {
+                background: #f1f5f9;
+                border-left: 4px solid #64748b;
+                padding: 0.85rem 1.2rem;
+                border-radius: 6px;
+                font-size: 0.875rem;
+                color: #475569;
+                margin: 1rem 0;
             }
         </style>
         """
     else:
         css = """
         <style>
-            /* ── Base Dark Theme ── */
             .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
-                background-color: #0e1117 !important;
-                color: #fafafa !important;
+                background-color: #090d16 !important;
+                color: #f1f5f9 !important;
             }
             [data-testid="stSidebar"] {
-                background-color: #161b22 !important;
-                border-right: 1px solid #30363d !important;
+                background-color: #111827 !important;
+                border-right: 1px solid #1f2937 !important;
             }
             .stButton > button {
-                background-color: #21262d !important;
-                color: #e6edf3 !important;
-                border: 1px solid #30363d !important;
+                background-color: #1f2937 !important;
+                color: #f9fafb !important;
+                border: 1px solid #374151 !important;
+                border-radius: 8px !important;
+            }
+            .stButton > button:hover {
+                border-color: #38bdf8 !important;
+                color: #38bdf8 !important;
             }
             .stButton > button[kind="primary"] {
-                background-color: #238636 !important;
+                background-color: #0284c7 !important;
                 color: #ffffff !important;
                 border: none !important;
             }
-            .theme-toggle-container button {
-                background-color: #21262d !important;
-                border: 1px solid #30363d !important;
-                color: #f0f6fc !important;
-                font-size: 1.35rem !important;
-                border-radius: 9999px !important;
+            .report-card {
+                background: #111827;
+                border: 1px solid #1f2937;
+                border-radius: 12px;
+                padding: 1.5rem;
+                margin-bottom: 1rem;
+            }
+            .disclaimer-banner {
+                background: #1e293b;
+                border-left: 4px solid #38bdf8;
+                padding: 0.85rem 1.2rem;
+                border-radius: 6px;
+                font-size: 0.875rem;
+                color: #cbd5e1;
+                margin: 1rem 0;
             }
         </style>
         """
@@ -216,391 +207,642 @@ apply_theme_css()
 
 
 # ══════════════════════════════════════════════════════════════
-# GATEWAY SCREEN: If user is NOT logged in, show Login / Register
+# SCREEN 1 & 2: REGISTRATION & LOGIN (When not authenticated)
 # ══════════════════════════════════════════════════════════════
 if not st.session_state.get("token"):
-    col_l, col_center, col_r = st.columns([1, 2, 1])
-    
-    with col_center:
-        st.markdown("<h2 style='text-align: center;'>🛡️ FSSAI Regulatory Compliance Copilot</h2>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; color: gray;'>Secure AI Compliance Intelligence</p>", unsafe_allow_html=True)
-        st.markdown("---")
+    left_pad, main_col, right_pad = st.columns([1, 2, 1])
 
-        auth_tab = st.radio("Please Sign In to Access the Dashboard", ["Login", "Create Account"], horizontal=True)
+    with main_col:
+        st.markdown(
+            """
+            <div style="text-align: center; margin-top: 2rem; margin-bottom: 1.5rem;">
+                <span style="font-size: 3rem;">🛡️</span>
+                <h1 style="margin: 0.5rem 0 0.2rem 0; font-size: 2rem;">Food Regulatory Intelligence Co-pilot</h1>
+                <p style="color: #64748b; font-size: 1rem;">
+                    Automated, evidence-based food compliance checking against official regulations
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-        if auth_tab == "Login":
-            st.subheader("Login to your Account")
-            login_email = st.text_input("Email Address", value="test@example.com", key="login_email")
-            login_pass = st.text_input("Password", type="password", value="password123", key="login_pass")
-            
-            if st.button("Sign In", type="primary", use_container_width=True):
-                if not login_email or not login_pass:
-                    st.warning("Please enter both email and password.")
+        auth_choice = st.radio(
+            "Account Access",
+            ["Log In", "Create New Account"],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+
+        if auth_choice == "Log In":
+            st.markdown("### Log In to Your Account")
+            login_email = st.text_input("Work Email Address", value="test@example.com", key="auth_login_email")
+            login_pass = st.text_input("Password", type="password", value="password123", key="auth_login_pass")
+
+            if st.button("Log In", type="primary", use_container_width=True):
+                if not login_email.strip() or not login_pass:
+                    st.warning("Please provide both email and password.")
                 else:
                     try:
-                        res = requests.post(
-                            f"{NODE_API}/auth/login",
-                            json={"email": login_email, "password": login_pass},
-                            timeout=10,
-                        )
-                        if res.status_code == 200:
-                            data = res.json()
+                        with st.spinner("Authenticating with server..."):
+                            resp = requests.post(
+                                f"{NODE_API}/auth/login",
+                                json={"email": login_email.strip(), "password": login_pass},
+                                timeout=15,
+                            )
+                        if resp.status_code == 200:
+                            data = resp.json()
                             st.session_state["token"] = data.get("token")
                             st.session_state["user"] = data.get("user")
-                            st.success("Authentication successful! Redirecting to dashboard...")
+                            st.session_state["nav_view"] = "Dashboard"
+                            st.success("Login successful! Redirecting...")
                             st.rerun()
                         else:
-                            st.error(res.json().get("error", "Invalid credentials. Please check your email/password."))
+                            err_msg = resp.json().get("error", "Invalid credentials. Please verify your email and password.")
+                            st.error(f"Authentication failed: {err_msg}")
                     except Exception as e:
-                        st.error(f"Cannot reach server: {e}")
+                        st.error(f"Cannot connect to the server at {NODE_API}. Please ensure the Node.js backend is running. ({e})")
 
         else:
-            st.subheader("Create a New Account")
-            reg_name = st.text_input("Full Name", value="", key="reg_name", placeholder="e.g. John Doe")
-            reg_email = st.text_input("Email Address", value="", key="reg_email", placeholder="e.g. user@company.com")
-            reg_pass = st.text_input("Password (min 8 characters)", type="password", key="reg_pass")
-            
-            if st.button("Register & Get Access", type="primary", use_container_width=True):
-                if not reg_name or not reg_email or not reg_pass:
-                    st.warning("Please fill in all registration fields.")
+            st.markdown("### Create an Account")
+            reg_name = st.text_input("Your Full Name", placeholder="e.g. Priya Sharma", key="reg_full_name")
+            reg_email = st.text_input("Work Email Address", placeholder="e.g. priya@biscuitco.com", key="reg_work_email")
+            reg_pass = st.text_input("Password (min 8 characters)", type="password", key="reg_password")
+
+            if st.button("Register Account", type="primary", use_container_width=True):
+                if not reg_name.strip() or not reg_email.strip() or not reg_pass:
+                    st.warning("Please fill out all registration fields.")
                 elif len(reg_pass) < 8:
                     st.warning("Password must be at least 8 characters long.")
                 else:
                     try:
-                        res = requests.post(
-                            f"{NODE_API}/auth/register",
-                            json={"name": reg_name, "email": reg_email, "password": reg_pass},
-                            timeout=10,
-                        )
-                        if res.status_code == 201:
-                            data = res.json()
+                        with st.spinner("Creating your account..."):
+                            resp = requests.post(
+                                f"{NODE_API}/auth/register",
+                                json={"name": reg_name.strip(), "email": reg_email.strip(), "password": reg_pass},
+                                timeout=15,
+                            )
+                        if resp.status_code == 201:
+                            data = resp.json()
                             st.session_state["token"] = data.get("token")
                             st.session_state["user"] = data.get("user")
-                            st.success("Account registered successfully! Redirecting...")
+                            st.session_state["nav_view"] = "Dashboard"
+                            st.success("Account created successfully! Welcome to the Compliance Co-pilot.")
                             st.rerun()
                         else:
-                            st.error(res.json().get("error", "Registration failed."))
+                            err_msg = resp.json().get("error", "Registration could not be completed.")
+                            st.error(f"Registration error: {err_msg}")
                     except Exception as e:
                         st.error(f"Cannot reach server: {e}")
 
-        st.markdown("---")
-        st.info("💡 **Demo Credentials**: Email `test@example.com` | Password `password123`")
+        st.markdown(
+            """
+            <div style="margin-top: 2rem; padding: 1rem; background: rgba(2, 132, 199, 0.08); border-radius: 8px; font-size: 0.875rem;">
+                <strong>Demo Credentials:</strong><br>
+                Email: <code>test@example.com</code> | Password: <code>password123</code>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     st.stop()
 
 
 # ══════════════════════════════════════════════════════════════
-# DASHBOARD (Accessible ONLY when authenticated with JWT token)
+# AUTHENTICATED APP SHELL (Sidebar, User Info, Navigation)
 # ══════════════════════════════════════════════════════════════
-
-# ── Sidebar Account & Navigation ──
 user = st.session_state.get("user") or {}
 
-st.sidebar.markdown("### 👤 User Profile")
-st.sidebar.success(f"**{user.get('name', 'User')}**")
+# ── Sidebar Navigation ──
+with st.sidebar:
+    st.markdown("### 🛡️ Compliance Co-pilot")
+    st.caption("Food Regulatory Intelligence")
+    st.markdown("---")
 
-email_display = user.get('email', '')
-role_display = user.get('role', 'user').upper()
-st.sidebar.markdown(f"📧 **{email_display}**")
-st.sidebar.markdown(f"🛡️ Role: **{role_display}**")
+    st.markdown(f"**👤 {user.get('name', 'User')}**")
+    st.caption(f"{user.get('email', '')}")
 
-if st.sidebar.button("🚪 Sign Out", use_container_width=True):
-    st.session_state["token"] = None
-    st.session_state["user"] = None
-    st.rerun()
+    st.markdown("---")
+    st.markdown("#### Navigation")
 
-st.sidebar.divider()
-st.sidebar.markdown("### 🧭 Navigation")
+    nav_options = [
+        "Dashboard",
+        "Upload Document",
+        "Compliance Reports",
+        "Search Regulations",
+    ]
+    
+    current_index = nav_options.index(st.session_state["nav_view"]) if st.session_state["nav_view"] in nav_options else 0
+    selected_nav = st.radio("Navigation Menu", nav_options, index=current_index, label_visibility="collapsed")
+    if selected_nav != st.session_state["nav_view"]:
+        st.session_state["nav_view"] = selected_nav
+        st.session_state["current_report"] = None
+        st.rerun()
 
-nav_options = [
-    "System Status",
-    "Document Library",
-    "Semantic Search",
-    "Compliance Assessment",
-    "Company Policy Upload",
-    "Audit History",
-]
-tab_selection = st.sidebar.radio("Go to:", nav_options)
-
-# ── Main Header with Light / Dark Mode Toggle Icon ──
-head_title, head_toggle = st.columns([10, 1])
-with head_title:
-    st.title("🛡️ FSSAI Food Regulatory Compliance Copilot")
-    st.caption(f"Logged in as **{user.get('name')}** | AI Compliance Intelligence Active")
-with head_toggle:
-    st.write("")  # vertical spacing
-    theme_icon = "☀️" if st.session_state["theme_mode"] == "light" else "🌙"
-    st.markdown('<div class="theme-toggle-container">', unsafe_allow_html=True)
-    if st.button(theme_icon, key="dash_header_theme_toggle", help=f"Switch to {'Dark' if st.session_state['theme_mode'] == 'light' else 'Light'} Mode"):
+    st.markdown("---")
+    # Theme toggle
+    theme_label = "🌙 Dark Mode" if st.session_state["theme_mode"] == "light" else "☀️ Light Mode"
+    if st.button(theme_label, use_container_width=True):
         st.session_state["theme_mode"] = "dark" if st.session_state["theme_mode"] == "light" else "light"
         st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
-# ── Tab 1: System Status ──
-if tab_selection == "System Status":
-    st.subheader("System Health & Service Connectivity")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("### Node.js Gateway (Port 3000)")
-        try:
-            res_node = requests.get(f"{NODE_API.replace('/api', '')}/", timeout=5)
-            if res_node.status_code == 200:
-                ndata = res_node.json()
-                st.success(f"Status: {ndata.get('status', 'running').upper()}")
-                st.write(f"Service: {ndata.get('service')}")
-                st.caption(f"Active Endpoints: {list(ndata.get('endpoints', {}).keys())}")
-            else:
-                st.error(f"Node.js Gateway returned status {res_node.status_code}")
-        except Exception as e:
-            st.error(f"Node.js Gateway unreachable: {e}")
+    # Step 8: Logout
+    if st.button("🚪 Log Out", use_container_width=True):
+        st.session_state["token"] = None
+        st.session_state["user"] = None
+        st.session_state["current_report"] = None
+        st.session_state["viewing_history_id"] = None
+        st.session_state["nav_view"] = "Dashboard"
+        st.rerun()
 
-    with col2:
-        st.markdown("### FastAPI RAG Backend (Port 8000)")
-        try:
-            res = requests.get(f"{NODE_API}/compliance/health", timeout=10)
-            if res.status_code == 200:
-                data = res.json().get("data", {})
-                st.success(f"Status: {data.get('status', '').upper()}")
-                st.write(f"**LLM Provider:** {data.get('llm_provider')} | **Embedding:** {data.get('embedding_provider')}")
-                db_info = data.get("database") or {}
-                st.write(f"**Supabase DB:** {db_info.get('status', 'unknown')}")
-                if db_info.get("version"):
-                    st.caption(f"Engine: {db_info.get('version')[:60]}...")
-                st.metric("Regulatory PDFs Indexed in data/", data.get("pdf_count", 0))
-            else:
-                st.error(f"FastAPI health check failed: {res.text}")
-        except Exception as e:
-            st.error(f"Could not connect to FastAPI proxy: {e}")
 
-# ── Tab 2: Document Library ──
-elif tab_selection == "Document Library":
-    st.subheader("Indexed Regulatory Documents")
-    
-    col1, col2 = st.columns([3, 1])
-    with col2:
-        if st.button("Trigger Ingestion (Admin)"):
-            with st.spinner("Ingesting PDFs..."):
-                try:
-                    res = requests.post(
-                        f"{NODE_API}/compliance/ingest",
-                        json={},
-                        headers=get_headers(),
-                        timeout=300,
-                    )
-                    if res.status_code == 200:
-                        st.success("Ingestion executed successfully!")
-                        st.json(res.json())
-                    else:
-                        st.error(f"Ingestion response ({res.status_code}): {res.text}")
-                except Exception as e:
-                    st.error(f"Error: {e}")
+# ── Render Helper: Detailed Compliance Report View ──────────────
+def render_compliance_report(report_data, doc_name=None, date_str=None, allow_back=True):
+    overall_status_raw = report_data.get("overall_status", "NEEDS_REVIEW")
+    status_info = map_status(overall_status_raw)
+    display_doc_name = doc_name or report_data.get("product_name") or "Food Product Specification"
+    display_date = format_date(date_str or report_data.get("created_at") or datetime.datetime.now().isoformat())
 
-    try:
-        res = requests.get(f"{NODE_API}/compliance/documents", headers=get_headers(), timeout=10)
-        if res.status_code == 200:
-            docs = res.json().get("data", [])
-            if docs:
-                for d in docs:
-                    with st.expander(f"📄 {d.get('title') or d.get('filename')}"):
-                        st.write(f"**Filename:** {d.get('filename')}")
-                        st.write(f"**Publication Date:** {d.get('publication_date') or 'N/A'}")
-                        st.write(f"**Pages:** {d.get('page_count')}")
-                        st.write(f"**Document ID:** `{d.get('id')}`")
-            else:
-                st.info("No documents indexed yet.")
-        else:
-            st.error(f"Unable to load documents: {res.text}")
-    except Exception as e:
-        st.warning(f"Unable to load documents: {e}")
-
-# ── Tab 3: Semantic Search ──
-elif tab_selection == "Semantic Search":
-    st.subheader("Search Regulatory Knowledge Base")
-    
-    query = st.text_input(
-        "Enter compliance query or regulation topic:",
-        value="What hygiene records should a food facility maintain?",
+    # Header Card
+    st.markdown(
+        f"""
+        <div class="report-card" style="border-top: 4px solid {status_info['badge_color']};">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 1rem;">
+                <div>
+                    <span style="font-size: 0.85rem; color: #64748b; text-transform: uppercase; font-weight: 600;">Product Document</span>
+                    <h2 style="margin: 0.2rem 0; font-size: 1.6rem;">{display_doc_name}</h2>
+                    <p style="color: #64748b; font-size: 0.9rem; margin: 0;">Date of Analysis: <strong>{display_date}</strong></p>
+                </div>
+                <div>
+                    <span style="background-color: {status_info['bg_color']}; color: {status_info['badge_color']}; border: 1px solid {status_info['border_color']}; padding: 8px 18px; border-radius: 24px; font-weight: 700; font-size: 1rem; display: inline-flex; align-items: center; gap: 6px;">
+                        {status_info['icon']} {status_info['label']}
+                    </span>
+                </div>
+            </div>
+            <div style="margin-top: 1.2rem; padding: 1rem; background: rgba(0,0,0,0.02); border-radius: 8px; border: 1px solid rgba(0,0,0,0.06);">
+                <strong style="color: #0f172a;">Executive Summary:</strong>
+                <p style="margin: 0.4rem 0 0 0; line-height: 1.5;">{report_data.get('summary', 'No summary available.')}</p>
+            </div>
+            <div class="disclaimer-banner">
+                <strong>Notice:</strong> {report_data.get('disclaimer', 'This compliance assessment is generated using official regulatory reference documents for informational purposes. It does not constitute formal legal certification.')}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    top_k = st.slider("Number of results", min_value=1, max_value=10, value=5)
 
-    if st.button("Search Regulations", type="primary"):
-        if not query.strip():
-            st.warning("Please enter a search query.")
+    findings = report_data.get("findings", [])
+    if not findings:
+        st.info("No specific requirement breakdown returned for this document.")
+        return
+
+    # Categorize findings
+    satisfied = [f for f in findings if map_status(f.get("status"))["category"] == "satisfied"]
+    attention = [f for f in findings if map_status(f.get("status"))["category"] == "attention"]
+    insufficient = [f for f in findings if map_status(f.get("status"))["category"] == "insufficient"]
+
+    # Metrics summary row
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Total Requirements Evaluated", len(findings))
+    with c2:
+        st.metric("Requirements Satisfied", len(satisfied), delta=None)
+    with c3:
+        st.metric("Needs Attention", len(attention), delta=None)
+    with c4:
+        st.metric("Insufficient Evidence", len(insufficient), delta=None)
+
+    st.markdown("---")
+    st.subheader("Detailed Requirements Breakdown")
+
+    # Tabs for finding categories
+    tab_att, tab_sat, tab_ins, tab_all = st.tabs([
+        f"⚠️ Needs Attention ({len(attention)})",
+        f"✅ Satisfied Requirements ({len(satisfied)})",
+        f"ℹ️ Insufficient Information ({len(insufficient)})",
+        f"All Findings ({len(findings)})",
+    ])
+
+    def render_finding_card(f, idx):
+        f_status = map_status(f.get("status"))
+        with st.expander(f"{f_status['icon']} {f.get('requirement', 'Regulatory Requirement')} — [{f_status['label']}]", expanded=(f_status['category'] != "satisfied")):
+            st.markdown(f"**Assessment Status:** <span style='color:{f_status['badge_color']}; font-weight:600;'>{f_status['label']}</span> ({f.get('status')})", unsafe_allow_html=True)
+            st.markdown(f"**Explanation:**\n{f.get('explanation', 'No detailed explanation provided.')}")
+            
+            ev_found = f.get("evidence_found") or []
+            if ev_found:
+                st.markdown("**Evidence Found in Document:**")
+                for e in ev_found:
+                    st.markdown(f"- ✅ {e}")
+            
+            ev_missing = f.get("evidence_missing") or []
+            if ev_missing:
+                st.markdown("**Missing Information / Evidence Required:**")
+                for m in ev_missing:
+                    st.markdown(f"- ⚠️ {m}")
+                    
+            actions = f.get("recommended_actions") or []
+            if actions:
+                st.markdown("**Suggested Corrective Actions:**")
+                for act in actions:
+                    st.markdown(f"- 💡 {act}")
+
+            reg_sources = f.get("regulatory_sources") or report_data.get("retrieved_sources") or []
+            if reg_sources:
+                st.caption("Supporting Regulatory References:")
+                for s in reg_sources[:3]:
+                    doc_title = s.get("document_name") or s.get("doc_title") or s.get("doc_filename") or "FSSAI Compendium"
+                    pages = f"Pages {s.get('page_start')}–{s.get('page_end')}" if s.get("page_start") else ""
+                    sec = f" | Section: {s.get('section')}" if s.get("section") else ""
+                    st.caption(f"📖 **{doc_title}** {pages}{sec}")
+
+    with tab_att:
+        if attention:
+            for i, f in enumerate(attention):
+                render_finding_card(f, f"att_{i}")
         else:
-            with st.spinner("Retrieving from Supabase pgvector..."):
+            st.success("No critical regulatory gaps or issues identified in this category!")
+
+    with tab_sat:
+        if satisfied:
+            for i, f in enumerate(satisfied):
+                render_finding_card(f, f"sat_{i}")
+        else:
+            st.info("No fully satisfied requirements recorded.")
+
+    with tab_ins:
+        if insufficient:
+            for i, f in enumerate(insufficient):
+                render_finding_card(f, f"ins_{i}")
+        else:
+            st.success("All requirements had sufficient evidence.")
+
+    with tab_all:
+        for i, f in enumerate(findings):
+            render_finding_card(f, f"all_{i}")
+
+    st.markdown("---")
+    btn_col1, btn_col2, _ = st.columns([1, 1, 2])
+    with btn_col1:
+        if st.button("📤 Check Another Document", key="report_another_doc", type="primary"):
+            st.session_state["current_report"] = None
+            st.session_state["nav_view"] = "Upload Document"
+            st.rerun()
+    with btn_col2:
+        if st.button("🏠 Back to Dashboard", key="report_back_dash"):
+            st.session_state["current_report"] = None
+            st.session_state["nav_view"] = "Dashboard"
+            st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════
+# STEP 3: DASHBOARD
+# ══════════════════════════════════════════════════════════════
+if st.session_state["nav_view"] == "Dashboard":
+    st.markdown(f"# Welcome back, {user.get('name', 'Auditor')}! 👋")
+    st.markdown(
+        """
+        <p style="font-size: 1.1rem; color: #64748b;">
+            Verify your food product specifications, ingredient lists, and package labels against official food regulations with automated, evidence-backed intelligence.
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Primary Call to Action Banner
+    dash_cta_col1, dash_cta_col2 = st.columns([3, 1])
+    with dash_cta_col1:
+        st.markdown(
+            """
+            <div style="background: linear-gradient(135deg, rgba(2, 132, 199, 0.12) 0%, rgba(56, 189, 248, 0.08) 100%); border: 1px solid rgba(2, 132, 199, 0.3); border-radius: 12px; padding: 1.5rem; margin: 1rem 0;">
+                <h3 style="margin-top:0; color: #0284c7;">Ready to evaluate a food product?</h3>
+                <p style="margin-bottom: 0.5rem; color: #334155;">
+                    Upload a product specification sheet, label draft, or ingredient declaration (PDF or TXT, max 5 MB). The co-pilot will analyze it against official regulatory compendiums and return a complete compliance report.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with dash_cta_col2:
+        st.write("")
+        st.write("")
+        if st.button("📤 Upload Document", type="primary", use_container_width=True, key="dash_btn_upload_start"):
+            st.session_state["nav_view"] = "Upload Document"
+            st.session_state["current_report"] = None
+            st.rerun()
+
+    st.markdown("---")
+    st.subheader("📋 Recent Compliance Checks")
+
+    # Fetch real recent audits from backend
+    try:
+        res = requests.get(f"{NODE_API}/audit?limit=5", headers=get_headers(), timeout=10)
+        if res.status_code == 200:
+            audit_json = res.json()
+            audits = audit_json.get("data", [])
+            total_checks = audit_json.get("pagination", {}).get("total", len(audits))
+
+            if not audits:
+                st.info("No compliance checks yet. Upload your first food product document above to generate a report.")
+            else:
+                st.caption(f"Showing {len(audits)} most recent of {total_checks} total compliance assessments on your account.")
+                for a in audits:
+                    status_info = map_status(a.get("overall_status"))
+                    doc_title = a.get("product_name") or a.get("question") or "Food Product Specification"
+                    created_date = format_date(a.get("created_at"))
+
+                    with st.container():
+                        c_info, c_action = st.columns([4, 1])
+                        with c_info:
+                            st.markdown(
+                                f"""
+                                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 4px;">
+                                    <strong style="font-size: 1.05rem;">{doc_title}</strong>
+                                    <span style="background: {status_info['bg_color']}; color: {status_info['badge_color']}; border: 1px solid {status_info['border_color']}; padding: 2px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 600;">
+                                        {status_info['icon']} {status_info['label']}
+                                    </span>
+                                </div>
+                                <div style="font-size: 0.85rem; color: #64748b;">
+                                    Area: <strong>{a.get('compliance_area')}</strong> | Assessed: {created_date}
+                                </div>
+                                <div style="font-size: 0.9rem; margin-top: 4px; color: #334155;">
+                                    {a.get('summary', '')[:160]}...
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
+                        with c_action:
+                            st.write("")
+                            if st.button("View Report ↗", key=f"dash_view_{a.get('id')}", use_container_width=True):
+                                # Load full report from backend
+                                det_resp = requests.get(f"{NODE_API}/audit/{a.get('id')}", headers=get_headers(), timeout=10)
+                                if det_resp.status_code == 200:
+                                    st.session_state["current_report"] = det_resp.json().get("data")
+                                    st.session_state["nav_view"] = "Compliance Reports"
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to fetch full report details.")
+                        st.markdown("<hr style='margin: 0.75rem 0; border: none; border-top: 1px solid #e2e8f0;'>", unsafe_allow_html=True)
+        else:
+            st.error(f"Could not load compliance checks from server: {res.text}")
+    except Exception as e:
+        st.warning(f"Unable to reach backend service: {e}")
+
+
+# ══════════════════════════════════════════════════════════════
+# STEP 4 & 5 & 6: UPLOAD PRODUCT DOCUMENT & ANALYSE & VIEW REPORT
+# ══════════════════════════════════════════════════════════════
+elif st.session_state["nav_view"] == "Upload Document":
+    # If a report was just generated in this session, show it!
+    if st.session_state.get("current_report"):
+        render_compliance_report(st.session_state["current_report"])
+    else:
+        st.title("📤 Upload Food Product Document")
+        st.markdown(
+            """
+            Upload your food product specification, ingredient declaration, or label content. 
+            The system will extract the readable text, retrieve relevant requirements from official food regulations, and generate an evidence-based compliance report.
+            """
+        )
+
+        # Upload card
+        with st.container():
+            col_doc, col_params = st.columns([3, 2])
+
+            with col_doc:
+                st.subheader("1. Select Document")
+                uploaded_file = st.file_uploader(
+                    "Choose a file (PDF or TXT)",
+                    type=["pdf", "txt"],
+                    help="Maximum file size: 5 MB. Must contain readable text (not scanned images without OCR).",
+                )
+
+                if uploaded_file is not None:
+                    # Client-side 5 MB file size check
+                    if uploaded_file.size > MAX_FILE_SIZE_BYTES:
+                        st.error(f"❌ File size ({uploaded_file.size / (1024*1024):.2f} MB) exceeds the maximum allowed size of 5 MB.")
+                        uploaded_file = None
+                    else:
+                        st.success(f"File selected: **{uploaded_file.name}** ({uploaded_file.size / 1024:.1f} KB)")
+
+            with col_params:
+                st.subheader("2. Compliance Details")
+                default_prod_name = ""
+                if uploaded_file:
+                    default_prod_name = os.path.splitext(uploaded_file.name)[0].replace("_", " ").title()
+
+                product_name_input = st.text_input(
+                    "Product / Document Name",
+                    value=default_prod_name,
+                    placeholder="e.g. Crispy Choco Chip Cookies",
+                )
+
+                compliance_area = st.selectbox(
+                    "Primary Regulatory Compliance Area",
+                    [
+                        "General Labelling & Display",
+                        "Food Additives",
+                        "Contaminants & Residues",
+                        "Licensing & Registration",
+                        "Hygiene & Sanitary Practices",
+                    ],
+                    help="Select which regulatory domain to evaluate first against official compendiums.",
+                )
+
+                facility_info = st.text_input(
+                    "Facility / Location Description (Optional)",
+                    placeholder="e.g. Biscuit manufacturing facility in Maharashtra",
+                )
+
+            st.markdown("---")
+
+            # Check Compliance Action Button
+            btn_col, _ = st.columns([2, 3])
+            with btn_col:
+                run_check = st.button("🔍 Check Compliance", type="primary", use_container_width=True)
+
+            if run_check:
+                if uploaded_file is None:
+                    st.warning("Please upload a food product document (PDF or TXT) before checking compliance.")
+                else:
+                    progress_container = st.container()
+                    with progress_container:
+                        progress_bar = st.progress(10, text="Uploading document to backend...")
+
+                        try:
+                            # ── Step 4: Upload to Node.js backend ──
+                            files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+                            upload_res = requests.post(
+                                f"{NODE_API}/upload/policy",
+                                files=files,
+                                headers=get_headers(),
+                                timeout=45,
+                            )
+
+                            if upload_res.status_code != 201:
+                                err_msg = upload_res.json().get("error", "Document upload failed.")
+                                progress_bar.empty()
+                                st.error(f"Upload error: {err_msg}")
+                            else:
+                                upload_data = upload_res.json()
+                                extracted_text = upload_data.get("extracted_text", "").strip()
+
+                                if len(extracted_text) < 15:
+                                    progress_bar.empty()
+                                    st.error("The uploaded document contains little to no readable text. Please upload a document with readable text or specifications.")
+                                else:
+                                    progress_bar.progress(40, text="Extracting readable text and searching regulatory reference compendiums...")
+
+                                    # ── Step 5: Analyse via Node.js -> FastAPI RAG ──
+                                    question_text = (
+                                        f"Assess regulatory compliance for product document '{product_name_input or uploaded_file.name}' "
+                                        f"against mandatory standards, labelling rules, safety thresholds, and permitted additives."
+                                    )
+
+                                    progress_bar.progress(65, text="Running AI compliance analysis against retrieved regulatory clauses...")
+
+                                    check_payload = {
+                                        "question": question_text,
+                                        "company_evidence": extracted_text,
+                                        "compliance_area": compliance_area,
+                                        "facility_description": facility_info or None,
+                                        "product_name": product_name_input or uploaded_file.name,
+                                        "top_k": 5,
+                                    }
+
+                                    check_res = requests.post(
+                                        f"{NODE_API}/compliance/check",
+                                        json=check_payload,
+                                        headers=get_headers(),
+                                        timeout=120,
+                                    )
+
+                                    if check_res.status_code == 200:
+                                        progress_bar.progress(100, text="Assessment complete! Generating report...")
+                                        result_payload = check_res.json().get("data", {})
+                                        # Save in session and display Step 6
+                                        st.session_state["current_report"] = result_payload
+                                        progress_bar.empty()
+                                        st.success("✅ Document analyzed and compliance report saved to history!")
+                                        st.rerun()
+                                    else:
+                                        progress_bar.empty()
+                                        err_detail = check_res.json().get("error", check_res.text)
+                                        st.error(f"Compliance analysis failed: {err_detail}")
+
+                        except Exception as e:
+                            progress_bar.empty()
+                            st.error(f"Communication error with backend: {e}")
+
+
+# ══════════════════════════════════════════════════════════════
+# STEP 7: COMPLIANCE REPORTS HISTORY
+# ══════════════════════════════════════════════════════════════
+elif st.session_state["nav_view"] == "Compliance Reports":
+    if st.session_state.get("current_report"):
+        render_compliance_report(st.session_state["current_report"])
+    else:
+        st.title("📋 Compliance Reports History")
+        st.caption("Revisit any previous food regulatory compliance assessment performed on your account.")
+
+        try:
+            with st.spinner("Loading compliance history..."):
+                res = requests.get(f"{NODE_API}/audit?limit=50", headers=get_headers(), timeout=15)
+            
+            if res.status_code == 200:
+                audit_resp = res.json()
+                audits = audit_resp.get("data", [])
+                pagination = audit_resp.get("pagination", {})
+                
+                if not audits:
+                    st.info("No compliance checks yet. Upload a product document to create your first report.")
+                    if st.button("Upload Document Now", type="primary"):
+                        st.session_state["nav_view"] = "Upload Document"
+                        st.rerun()
+                else:
+                    st.write(f"Total reports found: **{pagination.get('total', len(audits))}**")
+                    st.markdown("---")
+
+                    for a in audits:
+                        status_info = map_status(a.get("overall_status"))
+                        doc_title = a.get("product_name") or a.get("question") or "Food Product Assessment"
+                        created_date = format_date(a.get("created_at"))
+
+                        with st.container():
+                            col_txt, col_btn = st.columns([5, 1])
+                            with col_txt:
+                                st.markdown(
+                                    f"""
+                                    <div style="display: flex; align-items: center; gap: 10px;">
+                                        <h4 style="margin: 0; font-size: 1.1rem;">{doc_title}</h4>
+                                        <span style="background: {status_info['bg_color']}; color: {status_info['badge_color']}; border: 1px solid {status_info['border_color']}; padding: 2px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 600;">
+                                            {status_info['icon']} {status_info['label']}
+                                        </span>
+                                    </div>
+                                    <div style="font-size: 0.85rem; color: #64748b; margin-top: 2px;">
+                                        Area: <strong>{a.get('compliance_area')}</strong> | Assessed: <strong>{created_date}</strong>
+                                    </div>
+                                    <p style="margin: 6px 0 0 0; font-size: 0.9rem; color: #334155;">
+                                        {a.get('summary', '')[:220]}...
+                                    </p>
+                                    """,
+                                    unsafe_allow_html=True,
+                                )
+                            with col_btn:
+                                st.write("")
+                                if st.button("View Report", key=f"hist_btn_{a.get('id')}", use_container_width=True):
+                                    det_resp = requests.get(f"{NODE_API}/audit/{a.get('id')}", headers=get_headers(), timeout=10)
+                                    if det_resp.status_code == 200:
+                                        st.session_state["current_report"] = det_resp.json().get("data")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to load report.")
+
+                            st.markdown("<hr style='margin: 1rem 0; border: none; border-top: 1px solid #e2e8f0;'>", unsafe_allow_html=True)
+            else:
+                st.error(f"Failed to fetch audit history ({res.status_code}): {res.text}")
+        except Exception as e:
+            st.error(f"Error fetching compliance history: {e}")
+
+
+# ══════════════════════════════════════════════════════════════
+# OPTIONAL HELPER: SEARCH REGULATIONS
+# ══════════════════════════════════════════════════════════════
+elif st.session_state["nav_view"] == "Search Regulations":
+    st.title("🔍 Search Food Regulations")
+    st.caption("Look up specific regulatory clauses and compendiums from official food standards.")
+
+    search_query = st.text_input(
+        "Search regulatory requirements or topics:",
+        value="What mandatory labelling elements must appear on pre-packaged food containers?",
+    )
+    top_results = st.slider("Maximum matching clauses", min_value=1, max_value=10, value=5)
+
+    if st.button("Search Official Regulations", type="primary"):
+        if not search_query.strip():
+            st.warning("Please enter a search topic or question.")
+        else:
+            with st.spinner("Searching regulatory reference compendiums..."):
                 try:
                     res = requests.post(
                         f"{NODE_API}/compliance/search",
-                        json={"query": query, "top_k": top_k},
+                        json={"query": search_query.strip(), "top_k": top_results},
                         headers=get_headers(),
                         timeout=30,
                     )
                     if res.status_code == 200:
                         data = res.json().get("data", {})
                         results = data.get("results", [])
-                        st.write(f"Found {len(results)} relevant regulatory passages:")
-                        for r in results:
-                            sim = r.get("similarity", 0)
-                            with st.container():
-                                st.markdown(f"#### {r.get('doc_title') or r.get('doc_filename')} (Pages {r.get('page_start')}–{r.get('page_end')})")
-                                st.caption(f"Similarity Score: {sim:.4f} | Section: {r.get('section_title') or 'N/A'}")
-                                st.text_area("Content excerpt", r.get("content"), height=150, key=f"chunk_{r.get('chunk_id')}")
-                                st.divider()
+                        st.success(f"Found {len(results)} relevant regulatory passages:")
+
+                        for idx, r in enumerate(results, 1):
+                            doc_title = r.get("doc_title") or r.get("doc_filename") or "Regulatory Compendium"
+                            pages = f"Pages {r.get('page_start')}–{r.get('page_end')}" if r.get("page_start") else ""
+                            sec = f" | Section: {r.get('section_title')}" if r.get("section_title") else ""
+
+                            with st.expander(f"{idx}. {doc_title} ({pages}{sec})", expanded=(idx == 1)):
+                                st.caption(f"Relevance Score: {r.get('similarity', 0):.4f}")
+                                st.write(r.get("content"))
                     else:
-                        st.error(f"Search failed: {res.text}")
+                        st.error(f"Search request failed: {res.text}")
                 except Exception as e:
-                    st.error(f"Search request error: {e}")
-
-# ── Tab 4: Compliance Assessment ──
-elif tab_selection == "Compliance Assessment":
-    st.subheader("RAG Compliance Verification (Saved to Audit History)")
-
-    question = st.text_input(
-        "Compliance Question / Requirement:",
-        value="What mandatory labelling elements must appear on pre-packaged food containers?",
-    )
-    area = st.selectbox(
-        "Compliance Area:",
-        ["General Labelling & Display", "Contaminants & Residues", "Food Additives", "Licensing & Registration", "Hygiene & Sanitary Practices"],
-    )
-    evidence = st.text_area(
-        "Company Policy / Audit Evidence Document:",
-        value="Our product labels currently include: Product Brand Name, List of Ingredients in descending order, Net Quantity, Batch Number, Date of Manufacture, Best Before Date, Manufacturer Name and Complete Address, and FSSAI License Number with Logo.",
-        height=150,
-    )
-    facility_desc = st.text_input(
-        "Facility Description (Optional):",
-        value="Packaged snack foods manufacturer in Maharashtra",
-    )
-
-    if st.button("Run Compliance Assessment", type="primary"):
-        with st.spinner("Analyzing against FSSAI regulations & Groq LLM..."):
-            try:
-                res = requests.post(
-                    f"{NODE_API}/compliance/check",
-                    json={
-                        "question": question,
-                        "company_evidence": evidence,
-                        "compliance_area": area,
-                        "facility_description": facility_desc,
-                        "top_k": 5,
-                    },
-                    headers=get_headers(),
-                    timeout=120,
-                )
-                if res.status_code == 200:
-                    payload = res.json()
-                    result = payload.get("data", payload)
-                    status = result.get("overall_status")
-                    
-                    status_colors = {
-                        "COMPLIANT": "green",
-                        "PARTIALLY_COMPLIANT": "orange",
-                        "MISSING_EVIDENCE": "blue",
-                        "POTENTIALLY_NON_COMPLIANT": "red",
-                        "NEEDS_REVIEW": "gray",
-                    }
-                    st.markdown(f"### Overall Status: :{status_colors.get(status, 'gray')}[{status}]")
-                    st.info(result.get("summary"))
-
-                    findings = result.get("findings", [])
-                    if findings:
-                        st.subheader("Detailed Compliance Findings")
-                        for idx, f in enumerate(findings):
-                            with st.expander(f"Requirement: {f.get('requirement')} [{f.get('status')}]"):
-                                st.write("**Status:**", f.get("status"))
-                                st.write("**Explanation:**", f.get("explanation"))
-                                if f.get("evidence_found"):
-                                    st.write("**Evidence Found:**", ", ".join(f.get("evidence_found")))
-                                if f.get("evidence_missing"):
-                                    st.write("**Evidence Missing:**", ", ".join(f.get("evidence_missing")))
-                                if f.get("recommended_actions"):
-                                    st.write("**Recommended Actions:**")
-                                    for act in f.get("recommended_actions"):
-                                        st.write(f"- {act}")
-
-                    st.success("✅ Assessment successfully recorded to your Audit History.")
-                    st.warning(f"**Disclaimer:** {result.get('disclaimer')}")
-                else:
-                    st.error(f"Compliance check failed ({res.status_code}): {res.text}")
-            except Exception as e:
-                st.error(f"Request failed: {e}")
-
-# ── Tab 5: Company Policy Upload ──
-elif tab_selection == "Company Policy Upload":
-    st.subheader("📄 Upload Company Policy Document (PDF)")
-    st.caption("Upload your organization's internal standard or policy PDF. The Node.js gateway extracts text in-memory and stores it for compliance audits.")
-
-    uploaded_file = st.file_uploader("Select PDF Policy File", type=["pdf"])
-    if uploaded_file is not None:
-        if st.button("Upload & Extract Text", type="primary"):
-            with st.spinner("Uploading and extracting text via Node.js..."):
-                try:
-                    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
-                    res = requests.post(
-                        f"{NODE_API}/upload/policy",
-                        files=files,
-                        headers=get_headers(),
-                        timeout=60,
-                    )
-                    if res.status_code == 201:
-                        data = res.json()
-                        st.success(f"Uploaded successfully! Extracted {data.get('char_count', 0)} characters.")
-                        with st.expander("Preview Extracted Text"):
-                            st.text_area("Extracted Policy Text", data.get("extracted_text", ""), height=250)
-                    else:
-                        st.error(f"Upload failed: {res.text}")
-                except Exception as e:
-                    st.error(f"Error during upload: {e}")
-
-    st.divider()
-    st.subheader("Your Uploaded Policy Documents")
-    try:
-        res = requests.get(f"{NODE_API}/upload/policies", headers=get_headers(), timeout=10)
-        if res.status_code == 200:
-            policies = res.json().get("data", [])
-            if policies:
-                for p in policies:
-                    with st.expander(f"📑 {p.get('filename')} ({p.get('char_count')} chars) — {p.get('created_at')}"):
-                        st.write(f"**Document ID:** `{p.get('id')}`")
-                        st.write(f"**Uploaded on:** {p.get('created_at')}")
-            else:
-                st.info("No policy documents uploaded yet.")
-    except Exception as e:
-        st.error(f"Failed to fetch policies: {e}")
-
-# ── Tab 6: Audit History ──
-elif tab_selection == "Audit History":
-    st.subheader("📋 Compliance Audit History")
-    st.caption("Browse all historical compliance evaluations performed on your account.")
-
-    try:
-        res = requests.get(f"{NODE_API}/audit", headers=get_headers(), timeout=10)
-        if res.status_code == 200:
-            audit_data = res.json()
-            audits = audit_data.get("data", [])
-            pagination = audit_data.get("pagination", {})
-            
-            st.caption(f"Total audits recorded: **{pagination.get('total', len(audits))}**")
-            
-            if audits:
-                for a in audits:
-                    status = a.get("overall_status", "UNKNOWN")
-                    with st.expander(f"[{status}] {a.get('question')} — {a.get('created_at')}"):
-                        st.write(f"**Compliance Area:** {a.get('compliance_area')}")
-                        st.write(f"**Overall Status:** `{status}`")
-                        st.write(f"**Summary:** {a.get('summary')}")
-                        st.caption(f"Audit Record ID: `{a.get('id')}`")
-                        
-                        if st.button("View Full Findings", key=f"btn_{a.get('id')}"):
-                            det_res = requests.get(f"{NODE_API}/audit/{a.get('id')}", headers=get_headers(), timeout=10)
-                            if det_res.status_code == 200:
-                                det = det_res.json().get("data", {})
-                                st.json(det.get("findings"))
-            else:
-                st.info("No compliance audits found. Run an evaluation from the 'Compliance Assessment' tab to create your first audit record.")
-        else:
-            st.error(f"Failed to fetch audit history: {res.text}")
-    except Exception as e:
-        st.error(f"Error fetching audit history: {e}")
+                    st.error(f"Error connecting to search service: {e}")
