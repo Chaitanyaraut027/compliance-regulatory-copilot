@@ -103,6 +103,8 @@ router.post(
                 company_evidence,
                 compliance_area,
                 facility_description,
+                product_name,
+                product_id,
                 top_k = 5,
             } = req.body;
 
@@ -116,11 +118,12 @@ router.post(
             const result = response.data;
 
             // Persist audit record for the logged-in user
-            await query(
+            const auditInsert = await query(
                 `INSERT INTO audit_history
            (user_id, question, compliance_area, company_evidence, facility_description,
-            overall_status, summary, findings, disclaimer)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+            overall_status, summary, findings, disclaimer, product_name, product_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         RETURNING id, created_at`,
                 [
                     req.user.id,
                     question,
@@ -131,8 +134,15 @@ router.post(
                     result.summary || null,
                     JSON.stringify(result.findings || []),
                     result.disclaimer || null,
+                    product_name || null,
+                    product_id || null,
                 ]
             );
+            if (auditInsert.rows && auditInsert.rows[0]) {
+                result.audit_id = auditInsert.rows[0].id;
+                result.created_at = auditInsert.rows[0].created_at;
+            }
+            result.product_name = product_name || null;
 
             return res.json({ success: true, data: result });
         } catch (err) {

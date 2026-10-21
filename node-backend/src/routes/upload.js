@@ -9,13 +9,17 @@ const config = require('../config');
 
 const router = express.Router();
 
-// Use memory storage — buffer passed directly to pdf-parse, no disk I/O needed
+// Use memory storage — buffer passed directly to text extraction, no disk I/O needed
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: config.upload.maxFileSizeMb * 1024 * 1024 },
     fileFilter: (_req, file, cb) => {
-        if (file.mimetype !== 'application/pdf') {
-            return cb(new Error('Only PDF files are allowed. Received: ' + file.mimetype));
+        const allowedTypes = ['application/pdf', 'text/plain'];
+        const isAllowed = allowedTypes.includes(file.mimetype) ||
+                          file.originalname.toLowerCase().endsWith('.pdf') ||
+                          file.originalname.toLowerCase().endsWith('.txt');
+        if (!isAllowed) {
+            return cb(new Error('Only PDF or TXT files are allowed. Received: ' + file.mimetype));
         }
         cb(null, true);
     },
@@ -25,21 +29,24 @@ const upload = multer({
 router.post('/policy', authenticate, upload.single('file'), async (req, res, next) => {
     try {
         if (!req.file) {
-            return res.status(400).json({ success: false, error: 'No PDF file uploaded. Use field name: file' });
+            return res.status(400).json({ success: false, error: 'No document uploaded. Use field name: file' });
         }
 
-        // Extract text from in-memory buffer
-        let pdfData;
-        try {
-            pdfData = await pdfParse(req.file.buffer);
-        } catch (parseErr) {
-            return res.status(422).json({
-                success: false,
-                error: 'Could not extract text from PDF. Ensure the PDF is text-based (not a scanned image).',
-            });
+        // Extract text from in-memory buffer (PDF or TXT)
+        let extracted_text = '';
+        if (req.file.mimetype === 'text/plain' || req.file.originalname.toLowerCase().endsWith('.txt')) {
+            extracted_text = req.file.buffer.toString('utf-8').trim();
+        } else {
+            try {
+                const pdfData = await pdfParse(req.file.buffer);
+                extracted_text = (pdfData && pdfData.text) ? pdfData.text.trim() : '';
+            } catch (parseErr) {
+                return res.status(422).json({
+                    success: false,
+                    error: 'Could not extract readable text from PDF. Ensure the document is text-based.',
+                });
+            }
         }
-
-        const extracted_text = pdfData.text.trim();
         const char_count = extracted_text.length;
 
         // Save to DB

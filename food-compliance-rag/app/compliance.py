@@ -5,6 +5,12 @@ against retrieved FSSAI regulatory requirements.
 
 from __future__ import annotations
 
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+
 import json
 import logging
 from typing import Optional
@@ -31,6 +37,7 @@ CRITICAL RULES:
 3. Distinguish clearly between:
    - COMPLIANT: sufficient evidence supports the requirement
    - PARTIALLY_COMPLIANT: some evidence exists but required elements are missing
+   - NEEDS_ATTENTION: mandatory regulatory requirements, labelling declarations, or required evidence are missing
    - MISSING_EVIDENCE: no adequate supporting company evidence was found (this is NOT the same as non-compliance)
    - POTENTIALLY_NON_COMPLIANT: evidence directly contradicts or violates a requirement
    - NEEDS_REVIEW: evidence is ambiguous, conflicting, outdated, or insufficient

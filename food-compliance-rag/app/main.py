@@ -4,6 +4,12 @@ FastAPI application — Food Regulatory Compliance RAG API.
 
 from __future__ import annotations
 
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager

@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     @property
     def dsn(self) -> str:
         """PostgreSQL connection string for psycopg."""
-        if self.database_url:
+        if self.database_url and (not self.supabase_db_host or self.supabase_db_host in self.database_url):
             return self.database_url
         import urllib.parse
         user = urllib.parse.quote_plus(self.supabase_db_user)
