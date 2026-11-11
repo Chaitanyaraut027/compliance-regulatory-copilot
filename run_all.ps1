@@ -8,7 +8,7 @@ $root = $PSScriptRoot
 
 # 1. FastAPI
 Write-Host "`n[1/3] Starting Python FastAPI on port 8000..." -ForegroundColor Yellow
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\food-compliance-rag'; .\.venv\Scripts\Activate.ps1; uvicorn app.main:app --host 0.0.0.0 --port 8000"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\food-compliance-rag'; .\.venv\Scripts\Activate.ps1; python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
 Start-Sleep -Seconds 3
 

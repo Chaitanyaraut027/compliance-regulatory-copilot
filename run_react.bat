@@ -5,7 +5,7 @@ echo ===================================================
 echo.
 
 echo [1/3] Starting Python FastAPI Backend on port 8000...
-start "FastAPI RAG Engine (Port 8000)" cmd /k "cd /d "%~dp0food-compliance-rag" && .\.venv\Scripts\activate && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+start "FastAPI RAG Engine (Port 8000)" cmd /k "cd /d "%~dp0food-compliance-rag" && .\.venv\Scripts\activate && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
 timeout /t 3 /nobreak >nul
 
